@@ -34,15 +34,16 @@ import argparse
 import csv
 import os
 import time
+import uuid
 from collections import OrderedDict
 from pyspark.sql import SparkSession
 from pyspark.conf import SparkConf
-from PysparkBenchReport import PysparkBenchReport
+from .PysparkBenchReport import PysparkBenchReport
 from pyspark.sql import DataFrame
 
-from check import check_json_summary_folder, check_query_subset_exists, check_version
-from nds_gen_query_stream import split_special_query
-from nds_schema import get_schemas
+from .check import check_json_summary_folder, check_query_subset_exists, check_version
+from .nds_gen_query_stream import split_special_query
+from .nds_schema import get_schemas
 
 check_version()
 
@@ -58,6 +59,9 @@ def gen_sql_from_stream(query_stream_file_path):
     """
     with open(query_stream_file_path, 'r') as f:
         stream = f.read()
+    gen_sql_from_stream_text(stream)
+
+def gen_sql_from_stream_text(stream):
     all_queries = stream.split('-- start')[1:]
     # split query in query14, query23, query24, query39
     extended_queries = OrderedDict()
@@ -306,7 +310,34 @@ def load_properties(filename):
             myvars[name.strip()] = var.strip()
     return myvars
 
-if __name__ == "__main__":
+def run_query_stream_on_EKS():
+    try:
+        import importlib.resources as pkg_resources
+    except ImportError:
+        # Try backported to PY<37 `importlib_resources`.
+        import importlib_resources as pkg_resources
+    from . import nds_power_on_EKS  # relative-import the *package* containing the templates
+    stream = pkg_resources.read_text(nds_power_on_EKS, 'query_0.sql')
+    parameters = pkg_resources.read_text(nds_power_on_EKS, 'parameter')
+    parser = get_parser(use_local_stream_file = False)
+    args = parser.parse_args(parameters.split())
+    query_dict = gen_sql_from_stream_text(stream)
+    run_query_stream(args.input_prefix,
+                     args.property_file,
+                     query_dict,
+                     args.time_log,
+                     args.extra_time_log,
+                     args.sub_queries,
+                     args.input_format,
+                     not args.floats,
+                     args.output_prefix,
+                     args.output_format,
+                     args.json_summary_folder + str(uuid.uuid1()), # append uuid to avoid folder conflict
+                     args.delta_unmanaged,
+                     args.keep_sc,
+                     args.hive)
+
+def get_parser(use_local_stream_file = True):
     parser = parser = argparse.ArgumentParser()
     parser.add_argument('input_prefix',
                         help='text to prepend to every input file path (e.g., "hdfs:///ds-generated-data"). ' +
@@ -315,7 +346,8 @@ if __name__ == "__main__":
                         'session name "spark_catalog" is supported now, customized catalog is not ' +
                         'yet supported. Note if this points to a Delta Lake table, the path must be ' +
                         'absolute. Issue: https://github.com/delta-io/delta/issues/555')
-    parser.add_argument('query_stream_file',
+    if use_local_stream_file:
+        parser.add_argument('query_stream_file',
                         help='query stream file that contains NDS queries in specific order')
     parser.add_argument('time_log',
                         help='path to execution time log, only support local path.',
@@ -366,6 +398,10 @@ if __name__ == "__main__":
                         'in the stream file will be run. e.g. "query1,query2,query3". Note, use ' +
                         '"_part1" and "_part2" suffix for the following query names: ' +
                         'query14, query23, query24, query39. e.g. query14_part1, query39_part2')
+    return parser
+
+if __name__ == "__main__":
+    parser = get_parser()
     args = parser.parse_args()
     query_dict = gen_sql_from_stream(args.query_stream_file)
     run_query_stream(args.input_prefix,
